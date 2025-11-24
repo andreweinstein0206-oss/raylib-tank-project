@@ -1,4 +1,156 @@
-float)GetRandomValue(60, screenHeight-60)};
+// tank_game_with_powerups_and_questions.c
+#include "raylib.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdbool.h>
+#include <math.h>
+
+#define MAX_BULLETS 200
+#define MAX_WALLS 50
+#define MAX_POWERUPS 3
+#define PI 3.14159265358979323846f
+#define DEG2RAD (PI/180.0f)
+
+// -------------------- STRUCTS --------------------
+typedef struct Bullet {
+    Vector2 pos;
+    Vector2 vel;
+    bool active;
+    int owner; // 1 or 2
+} Bullet;
+
+typedef struct Tank {
+    Vector2 pos;
+    float rotation;
+    Color color;
+    int hp;
+    int score;
+} Tank;
+
+typedef struct Wall {
+    Rectangle rect;
+    Color color;
+} Wall;
+
+typedef struct PowerUp {
+    Vector2 pos;
+    bool active;
+    int effectType; // 1 = heal, 2 = wallbounce, 3 = rapid fire + bounce
+} PowerUp;
+
+// -------------------- GLOBALS --------------------
+static Bullet bullets[MAX_BULLETS];
+static Tank tank1, tank2;
+static Wall walls[MAX_WALLS];
+static int wallCount = 0;
+static PowerUp powerups[MAX_POWERUPS];
+
+static bool bulletBounceActive1 = false;
+static bool bulletBounceActive2 = false;
+
+static float speedTimer1 = 0.0f, speedTimer2 = 0.0f;
+static float rapidTimer1 = 0.0f, rapidTimer2 = 0.0f;
+static float rapidFireModifier1 = 1.0f, rapidFireModifier2 = 1.0f;
+
+static bool answeringQuestion = false;
+static int currentPowerUpIndex = -1;
+static int answeringPlayer = 0; // 1 or 2
+static int operandA = 0, operandB = 0, currentAnswer = 0;
+static char answerInput[16] = {0};
+static int answerLength = 0;
+static float answerTimer = 0.0f;
+static const float ANSWER_TIME = 6.0f;
+
+static const int screenWidth = 1750;
+static const int screenHeight = 800;
+static float tankRadius = 28.0f;
+static float bulletRadius = 6.0f;
+
+// -------------------- HELPERS --------------------
+void AddWall(float x, float y, float w, float h, Color color) {
+    if (wallCount < MAX_WALLS) {
+        walls[wallCount].rect = (Rectangle){x, y, w, h};
+        walls[wallCount].color = color;
+        wallCount++;
+    }
+}
+
+void DrawWalls() {
+    for (int i = 0; i < wallCount; i++)
+        DrawRectangleRec(walls[i].rect, walls[i].color);
+}
+
+static void ClampVec2(Vector2 *v, float minX, float minY, float maxX, float maxY) {
+    if (v->x < minX) v->x = minX;
+    if (v->x > maxX) v->x = maxX;
+    if (v->y < minY) v->y = minY;
+    if (v->y > maxY) v->y = maxY;
+}
+
+// Tank cannot pass through walls
+static void TankCollideWalls(Tank *tank) {
+    float tankW = 60.0f, tankH = 60.0f;
+    Rectangle tankRec = {tank->pos.x - tankW/2, tank->pos.y - tankH/2, tankW, tankH};
+    for (int i = 0; i < wallCount; i++) {
+        Rectangle w = walls[i].rect;
+        if (CheckCollisionRecs(tankRec, w)) {
+            float overlapLeft   = (tankRec.x + tankRec.width) - w.x;
+            float overlapRight  = (w.x + w.width) - tankRec.x;
+            float overlapTop    = (tankRec.y + tankRec.height) - w.y;
+            float overlapBottom = (w.y + w.height) - tankRec.y;
+            float minOverlapX = (overlapLeft < overlapRight) ? overlapLeft : -overlapRight;
+            float minOverlapY = (overlapTop < overlapBottom) ? overlapTop : -overlapBottom;
+            if (fabsf(minOverlapX) < fabsf(minOverlapY)) tank->pos.x -= minOverlapX;
+            else tank->pos.y -= minOverlapY;
+            tankRec.x = tank->pos.x - tankW/2;
+            tankRec.y = tank->pos.y - tankH/2;
+        }
+    }
+}
+
+void DrawHealthBar(Vector2 pos, int hp, Color barColor) {
+    float width = 80.0f, height = 10.0f;
+    int maxHp = 5;
+    if (hp < 0) hp = 0;
+    if (hp > maxHp) hp = maxHp;
+    Rectangle back = { pos.x - width/2, pos.y - 50, width, height };
+    Rectangle front = { pos.x - width/2, pos.y - 50, width*((float)hp/maxHp), height };
+    DrawRectangleRec(back, GRAY);
+    DrawRectangleRec(front, barColor);
+    DrawRectangleLines(back.x, back.y, back.width, back.height, BLACK);
+}
+
+void DrawPowerUps() {
+    for (int i = 0; i < MAX_POWERUPS; i++) {
+        if (!powerups[i].active) continue;
+        Color c = YELLOW;
+        if (powerups[i].effectType == 2) c = ORANGE;
+        if (powerups[i].effectType == 3) c = PURPLE;
+        DrawCircleV(powerups[i].pos, 18, c);
+        DrawText("?", (int)powerups[i].pos.x-6, (int)powerups[i].pos.y-12, 24, BLACK);
+    }
+}
+
+static void resetGame(void) {
+    tank1.pos = (Vector2){150.0f, screenHeight/2 - 100};
+    tank1.rotation = 0.0f; tank1.color = BLUE; tank1.hp = 5; tank1.score = 0;
+    tank2.pos = (Vector2){screenWidth-150.0f, screenHeight/2 + 100};
+    tank2.rotation = 180.0f; tank2.color = RED; tank2.hp = 5; tank2.score = 0;
+
+    for (int i = 0; i < MAX_BULLETS; i++) bullets[i].active = false;
+
+    speedTimer1 = speedTimer2 = rapidTimer1 = rapidTimer2 = 0.0f;
+
+    rapidFireModifier1 = rapidFireModifier2 = 1.0f;
+    bulletBounceActive1 = bulletBounceActive2 = false;
+
+    for (int i = 0; i < MAX_POWERUPS; i++) {
+        powerups[i].active = true;
+        powerups[i].effectType = GetRandomValue(1,3);
+        powerups[i].pos = (Vector2){(float)GetRandomValue(60, screenWidth-60),
+                                    (float)GetRandomValue(60, screenHeight-60)};
     }
 
     answeringQuestion = false;
@@ -401,3 +553,4 @@ for (int j = 0; j < wallCount; j++) {
     CloseWindow();
     return 0;
 }
+
